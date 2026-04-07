@@ -246,10 +246,10 @@ last_yawn_time = 0  #Stores the time when the last yawn was detected.
 alarm_start_time = 0  #Stores the time when the alarm started.
 
 if __name__ == "__main__":
-    # The mixer module is used to handle audio playbook .
-    # This must be called before loading or playing any sound.
-    mixer.init()
-    mixer.music.load(r"E:\\programming\\Drowsiness detection\\music.wav")
+    # # The mixer module is used to handle audio playbook .
+    # # This must be called before loading or playing any sound.
+    # mixer.init()
+    # mixer.music.load(r"E:\\programming\\Drowsiness detection\\music.wav")
 
     # Initialize webcam
     cap = cv2.VideoCapture(0) #to capture live video through the primary camera of the system 
