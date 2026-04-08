@@ -6,22 +6,17 @@ import math
 import av
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import threading
+import urllib.request
+import json
 
 # ─────────────────────────────────────────
-#  Safe mediapipe import with clear error
+#  Safe mediapipe import
 # ─────────────────────────────────────────
 try:
     import mediapipe as mp
-    # Trigger the attribute access early so we get a clear error here,
-    # not buried inside a callback at runtime.
     _test = mp.solutions.face_mesh
 except AttributeError:
-    st.error(
-        "❌ **mediapipe version incompatible.**\n\n"
-        "Your installed mediapipe does not expose `mp.solutions`. "
-        "Please set `mediapipe==0.10.13` in requirements.txt and redeploy.",
-        icon="🚨",
-    )
+    st.error("❌ mediapipe version incompatible. Set mediapipe==0.10.13 in requirements.txt", icon="🚨")
     st.stop()
 
 mp_face_mesh      = mp.solutions.face_mesh
@@ -39,46 +34,71 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─────────────────────────────────────────
-#  Custom CSS
-# ─────────────────────────────────────────
 st.markdown("""
 <style>
     .alert-box {
-        background: #cc0000;
-        color: white;
-        padding: 14px 20px;
-        border-radius: 8px;
-        font-size: 1.2rem;
-        font-weight: bold;
-        text-align: center;
-        animation: pulse 0.6s infinite alternate;
+        background: #cc0000; color: white; padding: 14px 20px;
+        border-radius: 8px; font-size: 1.2rem; font-weight: bold;
+        text-align: center; animation: pulse 0.6s infinite alternate;
     }
     @keyframes pulse { from {opacity:1;} to {opacity:0.55;} }
     .ok-box {
-        background: #155215;
-        color: #aaffaa;
-        padding: 12px 20px;
-        border-radius: 8px;
-        font-size: 1rem;
-        text-align: center;
+        background: #155215; color: #aaffaa; padding: 12px 20px;
+        border-radius: 8px; font-size: 1rem; text-align: center;
     }
     .wait-box {
-        background: #333;
-        color: #aaa;
-        padding: 12px 20px;
-        border-radius: 8px;
-        font-size: 1rem;
-        text-align: center;
-    }
-    button[data-testid="baseButton-secondary"] {
-        background-color: #e03030 !important;
-        color: white !important;
-        font-size: 1.1rem !important;
-        padding: 0.5rem 2rem !important;
+        background: #333; color: #aaa; padding: 12px 20px;
+        border-radius: 8px; font-size: 1rem; text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+#  TURN / ICE server config
+#  Using metered.ca free TURN — works on
+#  Render, Railway, Heroku, etc.
+# ─────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def get_ice_servers():
+    """
+    Fetch free TURN credentials from metered.ca.
+    Falls back to Google STUN only if the fetch fails.
+    metered.ca free tier: 500MB/month — enough for demos.
+    """
+    try:
+        url = "https://drowsiness.metered.live/api/v1/turn/credentials?apiKey=placeholder"
+        # Use open.metered.ca public demo endpoint (no key needed for basic STUN+TURN)
+        resp = urllib.request.urlopen(
+            "https://openrelay.metered.ca/api/v1/turn/credentials?apiKey=openrelayproject",
+            timeout=5
+        )
+        servers = json.loads(resp.read().decode())
+        return servers
+    except Exception:
+        # Fallback: multiple public STUN servers
+        return [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+            {"urls": "stun:stun2.l.google.com:19302"},
+            {"urls": "stun:stun3.l.google.com:19302"},
+            {"urls": "stun:stun4.l.google.com:19302"},
+            {"urls": "stun:openrelay.metered.ca:80"},
+            {
+                "urls": "turn:openrelay.metered.ca:80",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443?transport=tcp",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+        ]
 
 # ─────────────────────────────────────────
 #  Cached MediaPipe models
@@ -111,9 +131,6 @@ class Config:
     HEAD_RIGHT_ANGLE      = -20
     HAND_PROXIMITY_FACTOR =  0.8
 
-# ─────────────────────────────────────────
-#  Utilities
-# ─────────────────────────────────────────
 def aspect_ratio(landmarks, indices):
     try:
         A = np.linalg.norm(landmarks[indices[1]] - landmarks[indices[5]])
@@ -124,7 +141,7 @@ def aspect_ratio(landmarks, indices):
         return 0.0
 
 # ─────────────────────────────────────────
-#  PostureDetector (unchanged logic)
+#  PostureDetector
 # ─────────────────────────────────────────
 class PostureDetector:
     def __init__(self):
@@ -206,7 +223,7 @@ class PostureDetector:
         self.holistic.close()
 
 # ─────────────────────────────────────────
-#  Thread-safe detection state
+#  Thread-safe state
 # ─────────────────────────────────────────
 class DetectionState:
     def __init__(self):
@@ -230,9 +247,6 @@ class DetectionState:
         with self._lock:
             return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
-# ─────────────────────────────────────────
-#  Cached singleton resources
-# ─────────────────────────────────────────
 @st.cache_resource
 def get_resources():
     return DetectionState(), PostureDetector()
@@ -240,7 +254,7 @@ def get_resources():
 detection_state, posture_detector = get_resources()
 
 # ─────────────────────────────────────────
-#  Video frame callback
+#  Video callback
 # ─────────────────────────────────────────
 def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
     img = frame.to_ndarray(format="bgr24")
@@ -248,7 +262,6 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
     h, w, _ = img.shape
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # Holistic (posture + hand)
     hol = posture_detector.holistic.process(rgb)
     if hol.pose_landmarks:
         mp_drawing.draw_landmarks(
@@ -259,9 +272,7 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
             mp_drawing.draw_landmarks(img, hand_lm, mp_holistic.HAND_CONNECTIONS)
 
     posture = posture_detector.analyze_posture(hol)
-
-    # Face mesh (drowsiness)
-    fm = face_mesh.process(rgb)
+    fm      = face_mesh.process(rgb)
 
     s             = detection_state.snap()
     eye_counter   = s["eye_counter"]
@@ -288,7 +299,6 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
                        aspect_ratio(lm_arr, RIGHT_EYE)) / 2.0
             mar_val  = aspect_ratio(lm_arr, MOUTH)
 
-            # Eye drowsiness
             if ear_val < EYE_AR_THRESH:
                 eye_counter += 1
                 if eye_counter >= EYE_AR_CONSEC_FRAMES:
@@ -300,7 +310,6 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
             else:
                 eye_counter = 0
 
-            # Yawn detection
             if mar_val > MOUTH_AR_THRESH:
                 yawn_counter += 1
                 if yawn_counter >= MOUTH_AR_CONSEC_FRAMES:
@@ -317,12 +326,10 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
                 if now - last_yawn >= 4 and yawn_sequence > 0:
                     yawn_sequence = 0
 
-            # Stop alarm when person is awake
             if alarm_on and eye_counter == 0 and yawn_counter == 0:
                 if now - alarm_start > 1:
                     alarm_on = False
 
-    # HUD overlays
     cv2.putText(img, f"EAR: {ear_val:.2f}", (30, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     cv2.putText(img, f"MAR: {mar_val:.2f}", (30, 60),
@@ -346,7 +353,7 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ─────────────────────────────────────────
-#  Sidebar settings
+#  Sidebar
 # ─────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -361,57 +368,36 @@ with st.sidebar:
     st.markdown("🟠 Non-upright head posture")
 
 # ─────────────────────────────────────────
-#  Page title
+#  Title
 # ─────────────────────────────────────────
 st.title("😴 Drowsiness & Posture Detection")
 st.caption("Real-time driver / student monitoring · Sound alerts play in your browser automatically.")
 
 # ─────────────────────────────────────────
-#  Browser audio — Web Audio API beeper
+#  Browser beep (Web Audio API)
 # ─────────────────────────────────────────
 st.components.v1.html("""
 <script>
 (function () {
-    var audioCtx = null;
-    var active = false;
-
+    var audioCtx = null, active = false;
     function initAudio() {
-        if (!audioCtx) {
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (audioCtx.state === 'suspended') {
-            audioCtx.resume();
-        }
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
     }
-
     function beepOnce() {
         if (!active || !audioCtx) return;
-        var osc  = audioCtx.createOscillator();
+        var osc = audioCtx.createOscillator();
         var gain = audioCtx.createGain();
-        osc.type = 'square';
-        osc.frequency.value = 880;
+        osc.type = 'square'; osc.frequency.value = 880;
         gain.gain.value = 0.5;
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.2);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.2);
         setTimeout(beepOnce, 500);
     }
-
-    function startAlarm() {
-        if (active) return;
-        initAudio();
-        active = true;
-        beepOnce();
-    }
-
-    function stopAlarm() {
-        active = false;
-    }
-
+    function startAlarm() { if (active) return; initAudio(); active = true; beepOnce(); }
+    function stopAlarm()  { active = false; }
     window.addEventListener('click',   initAudio);
     window.addEventListener('keydown', initAudio);
-
     setInterval(function () {
         var el = parent.document.getElementById('alarm_flag');
         if (!el) return;
@@ -427,22 +413,21 @@ st.components.v1.html("""
 col_cam, col_stats = st.columns([3, 1])
 
 with col_cam:
-    st.info("📷 Click **START** to activate your webcam. Allow camera access when prompted.", icon="ℹ️")
+    st.info("📷 Click **START** → allow camera → detection begins automatically.", icon="ℹ️")
+
+    # Get ICE servers (with TURN fallback)
+    ice_servers = get_ice_servers()
+
     ctx = webrtc_streamer(
         key="drowsiness-detector",
         mode=WebRtcMode.SENDRECV,
-        rtc_configuration=RTCConfiguration({
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-            ]
-        }),
+        rtc_configuration=RTCConfiguration({"iceServers": ice_servers}),
         video_frame_callback=video_callback,
         media_stream_constraints={
             "video": {
                 "width":     {"ideal": 640},
                 "height":    {"ideal": 480},
-                "frameRate": {"ideal": 20},
+                "frameRate": {"ideal": 15},   # lowered to reduce server load
             },
             "audio": False,
         },
@@ -474,13 +459,11 @@ if ctx.state.playing:
         ph_posture.info(f"{icon} {snap['posture']}")
 
         if snap["alarm_on"]:
-            ph_alarm.markdown(
-                '<div class="alert-box">🚨 DROWSINESS ALERT!</div>',
-                unsafe_allow_html=True)
+            ph_alarm.markdown('<div class="alert-box">🚨 DROWSINESS ALERT!</div>',
+                              unsafe_allow_html=True)
         else:
-            ph_alarm.markdown(
-                '<div class="ok-box">✅ Alert & Awake</div>',
-                unsafe_allow_html=True)
+            ph_alarm.markdown('<div class="ok-box">✅ Alert & Awake</div>',
+                              unsafe_allow_html=True)
 
         if snap["yawn_sequence"] > 0:
             ph_yawn.warning(f"😮 Yawn count: {snap['yawn_sequence']}/4")
@@ -488,22 +471,16 @@ if ctx.state.playing:
             ph_yawn.empty()
 
         flag = "1" if snap["alarm_on"] else "0"
-        ph_flag.markdown(
-            f'<div id="alarm_flag" style="display:none">{flag}</div>',
-            unsafe_allow_html=True)
-
+        ph_flag.markdown(f'<div id="alarm_flag" style="display:none">{flag}</div>',
+                         unsafe_allow_html=True)
         time.sleep(0.25)
 else:
     ph_ear.metric("👁️ EAR", "—")
     ph_mar.metric("👄 MAR", "—")
     ph_posture.info("⏸ Camera not started")
-    ph_alarm.markdown(
-        '<div class="wait-box">⏸ Waiting for stream…</div>',
-        unsafe_allow_html=True)
+    ph_alarm.markdown('<div class="wait-box">⏸ Waiting for stream…</div>',
+                      unsafe_allow_html=True)
 
-# ─────────────────────────────────────────
-#  How it works
-# ─────────────────────────────────────────
 with st.expander("ℹ️ How it works"):
     st.markdown("""
 | Detection | Trigger | Alert |
@@ -515,5 +492,4 @@ with st.expander("ℹ️ How it works"):
 
 - **EAR** = Eye Aspect Ratio (lower → more closed)
 - **MAR** = Mouth Aspect Ratio (higher → more open / yawning)
-- Tune sensitivity from the sidebar sliders.
 """)
