@@ -76,13 +76,8 @@ def get_ice_servers():
         return servers
     except Exception:
         # Fallback: multiple public STUN servers
-        return [
+            return [
             {"urls": "stun:stun.l.google.com:19302"},
-            {"urls": "stun:stun1.l.google.com:19302"},
-            {"urls": "stun:stun2.l.google.com:19302"},
-            {"urls": "stun:stun3.l.google.com:19302"},
-            {"urls": "stun:stun4.l.google.com:19302"},
-            {"urls": "stun:openrelay.metered.ca:80"},
             {
                 "urls": "turn:openrelay.metered.ca:80",
                 "username": "openrelayproject",
@@ -92,12 +87,7 @@ def get_ice_servers():
                 "urls": "turn:openrelay.metered.ca:443",
                 "username": "openrelayproject",
                 "credential": "openrelayproject",
-            },
-            {
-                "urls": "turn:openrelay.metered.ca:443?transport=tcp",
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
+            }
         ]
 
 # ─────────────────────────────────────────
@@ -427,7 +417,7 @@ with col_cam:
             "video": {
                 "width":     {"ideal": 480},
                 "height":    {"ideal": 360},
-                "frameRate": {"ideal": 10},   # lowered to reduce server load
+                "frameRate": {"ideal": 8},   # lowered to reduce server load
             },
             "audio": False,
         },
