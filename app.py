@@ -1,12 +1,34 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import time
 import math
 import av
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import threading
+
+# ─────────────────────────────────────────
+#  Safe mediapipe import with clear error
+# ─────────────────────────────────────────
+try:
+    import mediapipe as mp
+    # Trigger the attribute access early so we get a clear error here,
+    # not buried inside a callback at runtime.
+    _test = mp.solutions.face_mesh
+except AttributeError:
+    st.error(
+        "❌ **mediapipe version incompatible.**\n\n"
+        "Your installed mediapipe does not expose `mp.solutions`. "
+        "Please set `mediapipe==0.10.13` in requirements.txt and redeploy.",
+        icon="🚨",
+    )
+    st.stop()
+
+mp_face_mesh      = mp.solutions.face_mesh
+mp_drawing        = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+mp_pose           = mp.solutions.pose
+mp_holistic       = mp.solutions.holistic
 
 # ─────────────────────────────────────────
 #  Page config
@@ -49,9 +71,6 @@ st.markdown("""
         font-size: 1rem;
         text-align: center;
     }
-    
-    
-    /* Make the START button more visible */
     button[data-testid="baseButton-secondary"] {
         background-color: #e03030 !important;
         color: white !important;
@@ -62,14 +81,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
-#  MediaPipe — cached so they survive reruns
+#  Cached MediaPipe models
 # ─────────────────────────────────────────
-mp_face_mesh      = mp.solutions.face_mesh
-mp_drawing        = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-mp_pose           = mp.solutions.pose
-mp_holistic       = mp.solutions.holistic
-
 @st.cache_resource
 def load_face_mesh():
     return mp_face_mesh.FaceMesh(
@@ -80,7 +93,7 @@ def load_face_mesh():
 face_mesh = load_face_mesh()
 
 # ─────────────────────────────────────────
-#  Constants
+#  Detection constants
 # ─────────────────────────────────────────
 EYE_AR_THRESH          = 0.27
 EYE_AR_CONSEC_FRAMES   = 20
@@ -111,7 +124,7 @@ def aspect_ratio(landmarks, indices):
         return 0.0
 
 # ─────────────────────────────────────────
-#  PostureDetector
+#  PostureDetector (unchanged logic)
 # ─────────────────────────────────────────
 class PostureDetector:
     def __init__(self):
@@ -121,29 +134,29 @@ class PostureDetector:
         )
 
     def _dist(self, a, b):
-        return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
     def detect_head_position(self, results):
         if not results.face_landmarks:
             return "Unknown"
-        fl       = results.face_landmarks.landmark
-        nose     = np.array([fl[1].x,   fl[1].y,   fl[1].z])
-        l_eye    = np.array([fl[33].x,  fl[33].y,  fl[33].z])
-        r_eye    = np.array([fl[263].x, fl[263].y, fl[263].z])
-        mid      = (l_eye + r_eye) / 2
-        fwd      = nose - mid
-        n        = np.linalg.norm(fwd)
+        fl    = results.face_landmarks.landmark
+        nose  = np.array([fl[1].x,   fl[1].y,   fl[1].z])
+        l_eye = np.array([fl[33].x,  fl[33].y,  fl[33].z])
+        r_eye = np.array([fl[263].x, fl[263].y, fl[263].z])
+        mid   = (l_eye + r_eye) / 2
+        fwd   = nose - mid
+        n     = np.linalg.norm(fwd)
         if n < 1e-6:
             return "Upright"
-        fwd /= n
-        cam_up   = np.array([0.0, -1.0, 0.0])
-        pitch    = math.degrees(math.asin(np.clip(np.dot(fwd, cam_up), -1, 1)))
-        fwd_h    = fwd - np.dot(fwd, cam_up) * cam_up
-        hn       = np.linalg.norm(fwd_h)
+        fwd  /= n
+        cam_up = np.array([0.0, -1.0, 0.0])
+        pitch  = math.degrees(math.asin(np.clip(np.dot(fwd, cam_up), -1.0, 1.0)))
+        fwd_h  = fwd - np.dot(fwd, cam_up) * cam_up
+        hn     = np.linalg.norm(fwd_h)
         if hn < 1e-6:
             return "Upright"
-        fwd_h   /= hn
-        yaw      = math.degrees(math.atan2(fwd_h[0], -fwd_h[2]))
+        fwd_h /= hn
+        yaw = math.degrees(math.atan2(fwd_h[0], -fwd_h[2]))
         if   yaw   >  Config.HEAD_LEFT_ANGLE:  return "Left"
         elif yaw   <  Config.HEAD_RIGHT_ANGLE: return "Right"
         elif pitch <  Config.HEAD_DOWN_ANGLE:  return "Down"
@@ -153,20 +166,20 @@ class PostureDetector:
     def detect_hand_position(self, results):
         if not results.pose_landmarks or not results.face_landmarks:
             return "Unknown"
-        pl      = results.pose_landmarks.landmark
-        fl      = results.face_landmarks.landmark
-        nose    = [pl[mp_pose.PoseLandmark.NOSE.value].x,
-                   pl[mp_pose.PoseLandmark.NOSE.value].y]
-        chin    = [fl[152].x, fl[152].y]
-        lw      = [pl[mp_pose.PoseLandmark.LEFT_WRIST.value].x,
-                   pl[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
-        rw      = [pl[mp_pose.PoseLandmark.RIGHT_WRIST.value].x,
-                   pl[mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
-        le      = [pl[mp_pose.PoseLandmark.LEFT_EAR.value].x,
-                   pl[mp_pose.PoseLandmark.LEFT_EAR.value].y]
-        re      = [pl[mp_pose.PoseLandmark.RIGHT_EAR.value].x,
-                   pl[mp_pose.PoseLandmark.RIGHT_EAR.value].y]
-        thr     = self._dist(le, re) * Config.HAND_PROXIMITY_FACTOR
+        pl   = results.pose_landmarks.landmark
+        fl   = results.face_landmarks.landmark
+        nose = [pl[mp_pose.PoseLandmark.NOSE.value].x,
+                pl[mp_pose.PoseLandmark.NOSE.value].y]
+        chin = [fl[152].x, fl[152].y]
+        lw   = [pl[mp_pose.PoseLandmark.LEFT_WRIST.value].x,
+                pl[mp_pose.PoseLandmark.LEFT_WRIST.value].y]
+        rw   = [pl[mp_pose.PoseLandmark.RIGHT_WRIST.value].x,
+                pl[mp_pose.PoseLandmark.RIGHT_WRIST.value].y]
+        le   = [pl[mp_pose.PoseLandmark.LEFT_EAR.value].x,
+                pl[mp_pose.PoseLandmark.LEFT_EAR.value].y]
+        re   = [pl[mp_pose.PoseLandmark.RIGHT_EAR.value].x,
+                pl[mp_pose.PoseLandmark.RIGHT_EAR.value].y]
+        thr  = self._dist(le, re) * Config.HAND_PROXIMITY_FACTOR
         if self._dist(lw, chin) < thr or self._dist(rw, chin) < thr:
             return "Hands on Chin"
         if self._dist(lw, rw) < thr and lw[1] < nose[1] and rw[1] < nose[1]:
@@ -227,7 +240,7 @@ def get_resources():
 detection_state, posture_detector = get_resources()
 
 # ─────────────────────────────────────────
-#  Video frame callback (runs in WebRTC thread)
+#  Video frame callback
 # ─────────────────────────────────────────
 def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
     img = frame.to_ndarray(format="bgr24")
@@ -235,7 +248,7 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
     h, w, _ = img.shape
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # Holistic (posture)
+    # Holistic (posture + hand)
     hol = posture_detector.holistic.process(rgb)
     if hol.pose_landmarks:
         mp_drawing.draw_landmarks(
@@ -273,9 +286,9 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
 
             ear_val = (aspect_ratio(lm_arr, LEFT_EYE) +
                        aspect_ratio(lm_arr, RIGHT_EYE)) / 2.0
-            mar_val = aspect_ratio(lm_arr, MOUTH)
+            mar_val  = aspect_ratio(lm_arr, MOUTH)
 
-            # ── Eye drowsiness ──────────────────────────────────
+            # Eye drowsiness
             if ear_val < EYE_AR_THRESH:
                 eye_counter += 1
                 if eye_counter >= EYE_AR_CONSEC_FRAMES:
@@ -287,7 +300,7 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
             else:
                 eye_counter = 0
 
-            # ── Yawn detection ──────────────────────────────────
+            # Yawn detection
             if mar_val > MOUTH_AR_THRESH:
                 yawn_counter += 1
                 if yawn_counter >= MOUTH_AR_CONSEC_FRAMES:
@@ -304,12 +317,12 @@ def video_callback(frame: av.VideoFrame) -> av.VideoFrame:
                 if now - last_yawn >= 4 and yawn_sequence > 0:
                     yawn_sequence = 0
 
-            # ── Stop alarm when awake ───────────────────────────
+            # Stop alarm when person is awake
             if alarm_on and eye_counter == 0 and yawn_counter == 0:
                 if now - alarm_start > 1:
                     alarm_on = False
 
-    # ── HUD text ─────────────────────────────────────────────
+    # HUD overlays
     cv2.putText(img, f"EAR: {ear_val:.2f}", (30, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     cv2.putText(img, f"MAR: {mar_val:.2f}", (30, 60),
@@ -354,7 +367,7 @@ st.title("😴 Drowsiness & Posture Detection")
 st.caption("Real-time driver / student monitoring · Sound alerts play in your browser automatically.")
 
 # ─────────────────────────────────────────
-#  Browser audio — Web Audio API oscillator
+#  Browser audio — Web Audio API beeper
 # ─────────────────────────────────────────
 st.components.v1.html("""
 <script>
@@ -373,27 +386,21 @@ st.components.v1.html("""
 
     function beepOnce() {
         if (!active || !audioCtx) return;
-
-        var osc = audioCtx.createOscillator();
+        var osc  = audioCtx.createOscillator();
         var gain = audioCtx.createGain();
-
         osc.type = 'square';
         osc.frequency.value = 880;
         gain.gain.value = 0.5;
-
         osc.connect(gain);
         gain.connect(audioCtx.destination);
-
         osc.start();
         osc.stop(audioCtx.currentTime + 0.2);
-
         setTimeout(beepOnce, 500);
     }
 
     function startAlarm() {
         if (active) return;
-
-        initAudio();   // 🔥 important
+        initAudio();
         active = true;
         beepOnce();
     }
@@ -402,36 +409,25 @@ st.components.v1.html("""
         active = false;
     }
 
-    // 🔥 KEY FIX: Listen to ANY user interaction
-    window.addEventListener('click', initAudio);
+    window.addEventListener('click',   initAudio);
     window.addEventListener('keydown', initAudio);
 
     setInterval(function () {
-        var el = parent.document.getElementById('alarm_flag'); // 🔥 IMPORTANT CHANGE
+        var el = parent.document.getElementById('alarm_flag');
         if (!el) return;
-
-        if (el.innerText.trim() === '1') {
-            startAlarm();
-        } else {
-            stopAlarm();
-        }
+        el.innerText.trim() === '1' ? startAlarm() : stopAlarm();
     }, 300);
-
 })();
 </script>
 """, height=0)
 
 # ─────────────────────────────────────────
-#  Main layout: camera | stats
+#  Main layout
 # ─────────────────────────────────────────
 col_cam, col_stats = st.columns([3, 1])
 
 with col_cam:
-    st.info(
-        "📷 Click **START** to activate your webcam. "
-        "Your browser will ask for camera permission — click **Allow**.",
-        icon="ℹ️",
-    )
+    st.info("📷 Click **START** to activate your webcam. Allow camera access when prompted.", icon="ℹ️")
     ctx = webrtc_streamer(
         key="drowsiness-detector",
         mode=WebRtcMode.SENDRECV,
@@ -443,7 +439,11 @@ with col_cam:
         }),
         video_frame_callback=video_callback,
         media_stream_constraints={
-            "video": {"width": {"ideal": 640}, "height": {"ideal": 480}, "frameRate": {"ideal": 20}},
+            "video": {
+                "width":     {"ideal": 640},
+                "height":    {"ideal": 480},
+                "frameRate": {"ideal": 20},
+            },
             "audio": False,
         },
         async_processing=True,
@@ -459,22 +459,16 @@ with col_stats:
     ph_flag    = st.empty()
 
 # ─────────────────────────────────────────
-#  Live stats update loop
+#  Live stats loop
 # ─────────────────────────────────────────
 if ctx.state.playing:
     while ctx.state.playing:
         snap = detection_state.snap()
 
-        ph_ear.metric(
-            "👁️ EAR (eyes)",
-            f"{snap['eye_ar']:.3f}",
-            delta="⚠ closed" if snap['eye_ar'] < EYE_AR_THRESH else "open",
-        )
-        ph_mar.metric(
-            "👄 MAR (yawn)",
-            f"{snap['mouth_ar']:.3f}",
-            delta="⚠ yawning" if snap['mouth_ar'] > MOUTH_AR_THRESH else "normal",
-        )
+        ph_ear.metric("👁️ EAR (eyes)", f"{snap['eye_ar']:.3f}",
+                      delta="⚠ closed"  if snap['eye_ar']   < EYE_AR_THRESH  else "open")
+        ph_mar.metric("👄 MAR (yawn)", f"{snap['mouth_ar']:.3f}",
+                      delta="⚠ yawning" if snap['mouth_ar'] > MOUTH_AR_THRESH else "normal")
 
         icon = "🟢" if "Attentive" in snap["posture"] else "🟠"
         ph_posture.info(f"{icon} {snap['posture']}")
@@ -482,25 +476,21 @@ if ctx.state.playing:
         if snap["alarm_on"]:
             ph_alarm.markdown(
                 '<div class="alert-box">🚨 DROWSINESS ALERT!</div>',
-                unsafe_allow_html=True,
-            )
+                unsafe_allow_html=True)
         else:
             ph_alarm.markdown(
                 '<div class="ok-box">✅ Alert & Awake</div>',
-                unsafe_allow_html=True,
-            )
+                unsafe_allow_html=True)
 
         if snap["yawn_sequence"] > 0:
             ph_yawn.warning(f"😮 Yawn count: {snap['yawn_sequence']}/4")
         else:
             ph_yawn.empty()
 
-        # Hidden div for JS alarm beep
         flag = "1" if snap["alarm_on"] else "0"
         ph_flag.markdown(
             f'<div id="alarm_flag" style="display:none">{flag}</div>',
-            unsafe_allow_html=True,
-        )
+            unsafe_allow_html=True)
 
         time.sleep(0.25)
 else:
@@ -509,8 +499,7 @@ else:
     ph_posture.info("⏸ Camera not started")
     ph_alarm.markdown(
         '<div class="wait-box">⏸ Waiting for stream…</div>',
-        unsafe_allow_html=True,
-    )
+        unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
 #  How it works
@@ -524,7 +513,7 @@ with st.expander("ℹ️ How it works"):
 | **Head tilt** | Left / Right / Down / Back | 🟠 Label on video |
 | **Hands on face** | Wrist near chin / ears | 🟠 Label on video |
 
-- **EAR** = Eye Aspect Ratio (lower → more closed)  
-- **MAR** = Mouth Aspect Ratio (higher → more open / yawning)  
-- Tune sensitivity using the sidebar sliders.
+- **EAR** = Eye Aspect Ratio (lower → more closed)
+- **MAR** = Mouth Aspect Ratio (higher → more open / yawning)
+- Tune sensitivity from the sidebar sliders.
 """)
