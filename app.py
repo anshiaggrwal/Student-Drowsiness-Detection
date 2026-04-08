@@ -425,9 +425,9 @@ with col_cam:
         video_frame_callback=video_callback,
         media_stream_constraints={
             "video": {
-                "width":     {"ideal": 640},
-                "height":    {"ideal": 480},
-                "frameRate": {"ideal": 15},   # lowered to reduce server load
+                "width":     {"ideal": 480},
+                "height":    {"ideal": 360},
+                "frameRate": {"ideal": 10},   # lowered to reduce server load
             },
             "audio": False,
         },
